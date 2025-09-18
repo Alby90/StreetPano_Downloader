@@ -8,18 +8,43 @@ import os
 from PIL import Image
 import glob
 
-# Import opzionali
+# Import opzionali con gestione errore Intel MKL
+HAS_NUMPY = False
+HAS_OPENCV = False
+
 try:
+    # Tenta import numpy con gestione errore MKL
     import numpy as np
     HAS_NUMPY = True
+    print("✓ NumPy disponibile per conversioni ottimizzate")
 except ImportError:
+    print("⚠ NumPy non disponibile - usando implementazioni pure Python")
     HAS_NUMPY = False
+except Exception as e:
+    # Gestisce errori MKL Intel specificamente  
+    if "mkl" in str(e).lower() or "intel" in str(e).lower():
+        print("⚠ Errore Intel MKL rilevato - disabilitando NumPy")
+        print(f"  Errore specifico: {e}")
+        print("  Suggerimento: pip uninstall numpy && pip install numpy==1.24.3")
+        HAS_NUMPY = False
+    else:
+        print(f"⚠ Errore NumPy generico: {e}")
+        HAS_NUMPY = False
 
 try:
     import cv2
     HAS_OPENCV = True
+    print("✓ OpenCV disponibile per elaborazioni avanzate")
 except ImportError:
+    print("⚠ OpenCV non disponibile")
     HAS_OPENCV = False
+except Exception as e:
+    if "mkl" in str(e).lower() or "intel" in str(e).lower():
+        print("⚠ Errore Intel MKL in OpenCV - disabilitando")
+        HAS_OPENCV = False
+    else:
+        print(f"⚠ Errore OpenCV: {e}")
+        HAS_OPENCV = False
 
 
 class PanoramaConverter:

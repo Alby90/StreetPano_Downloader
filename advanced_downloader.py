@@ -2,27 +2,65 @@
 Google Street View Downloader - Versione Avanzata
 Supporta download multipli, conversione cubemap e elaborazione file locali
 """
-
-import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
-import requests
-import re
-from PIL import Image, ImageTk
 import os
-import threading
-import time
-import urllib.parse
 import json
 from datetime import datetime
 import math
 import glob
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox
+import re
+import threading
+import requests
+from PIL import Image, ImageTk
+import time
+
+# Import localization
+from localization import t, set_language, get_language, get_available_languages, register_callback
+
+# Import opzionali con gestione errori MKL Intel
+HAS_NUMPY = False
+HAS_OPENCV = False
+
+try:
+    # Tenta import numpy con gestione errore MKL
+    import numpy as np
+    HAS_NUMPY = True
+    print("✓ NumPy disponibile per performance ottimizzate")
+except ImportError:
+    print("⚠ NumPy non disponibile - usando implementazioni pure Python")
+    HAS_NUMPY = False
+except Exception as e:
+    # Gestisce errori MKL Intel specificamente
+    if "mkl" in str(e).lower() or "intel" in str(e).lower():
+        print("⚠ Errore Intel MKL rilevato - disabilitando NumPy")
+        print(f"  Errore specifico: {e}")
+        print("  Suggerimento: pip uninstall numpy && pip install numpy==1.24.3")
+        HAS_NUMPY = False
+    else:
+        print(f"⚠ Errore NumPy generico: {e}")
+        HAS_NUMPY = False
+
+try:
+    import cv2
+    HAS_OPENCV = True
+    print("✓ OpenCV disponibile per elaborazioni avanzate")
+except ImportError:
+    print("⚠ OpenCV non disponibile")
+    HAS_OPENCV = False
+except Exception as e:
+    print(f"⚠ Errore OpenCV: {e}")
+    HAS_OPENCV = False
 
 
 class AdvancedStreetViewDownloader:
     def __init__(self, root):
         self.root = root
-        self.root.title("Google Street View Downloader - Versione Avanzata")
+        self.root.title(t('app_title'))
         self.root.geometry("1000x800")
+        
+        # Registra callback per aggiornamenti localizzazione
+        register_callback(self.update_ui_language)
         
         # Variabili per il download
         self.current_image = None
@@ -43,56 +81,153 @@ class AdvancedStreetViewDownloader:
             r'pano=([a-zA-Z0-9_-]{20,})',
         ]
         
+        # Mappa per referenze widget che necessitano traduzione
+        self.ui_elements = {}
+        
         self.setup_ui()
+    
+    def update_ui_language(self):
+        """Aggiorna tutti i testi dell'interfaccia con la lingua corrente"""
+        # Aggiorna titolo finestra
+        self.root.title(t('app_title'))
+        
+        # Aggiorna menu (solo se esiste)
+        if hasattr(self, 'menubar'):
+            try:
+                # Ottieni i menu esistenti
+                file_menu_index = 0
+                lang_menu_index = 1
+                
+                # Aggiorna labels dei menu principali
+                self.menubar.entryconfig(file_menu_index, label=t('menu_file'))
+                self.menubar.entryconfig(lang_menu_index, label=t('menu_language'))
+            except:
+                pass  # Ignora errori menu
+        
+        # Aggiorna tab labels
+        if hasattr(self, 'notebook'):
+            try:
+                self.notebook.tab(0, text=t('tab_streetview'))
+                self.notebook.tab(1, text=t('tab_local_files'))
+                self.notebook.tab(2, text=t('tab_batch'))
+            except:
+                pass  # Ignora errori tab
+        
+        # Aggiorna tutti i widget tracciati
+        for element_key, widget in self.ui_elements.items():
+            if hasattr(widget, 'config'):
+                try:
+                    # Per i frame LabelFrame aggiorna il testo
+                    if isinstance(widget, ttk.LabelFrame):
+                        if element_key.endswith('_frame'):
+                            key = element_key.replace('_frame', '')
+                            widget.config(text=t(key))
+                    # Per i label, button e radiobutton aggiorna il testo
+                    elif hasattr(widget, 'config'):
+                        if element_key in ['sv_title', 'sv_resolution_label', 'sv_overlap_label', 
+                                         'sv_format_label', 'sv_extract_btn', 'sv_download_btn', 
+                                         'sv_save_btn', 'validate_btn', 'clear_btn']:
+                            widget.config(text=t(element_key))
+                        elif element_key in ['sv_format_equirect', 'sv_format_cubemap']:
+                            widget.config(text=t(element_key))
+                except:
+                    pass  # Ignora errori di aggiornamento widget
+        
+        # Aggiorna status messages dinamici
+        if hasattr(self, 'status_single_var'):
+            try:
+                current_status = self.status_single_var.get()
+                if current_status in ["Pronto", "Ready"]:
+                    self.status_single_var.set(t('status_ready'))
+            except:
+                pass
+        
+        # Aggiorna preview label
+        if hasattr(self, 'preview_single'):
+            try:
+                current_text = self.preview_single.cget('text')
+                if 'immagine caricata' in current_text or 'image loaded' in current_text:
+                    self.preview_single.config(text=t('no_image_loaded'))
+            except:
+                pass
+        
+        # Forza aggiornamento display
+        try:
+            self.root.update_idletasks()
+        except:
+            pass
         
     def setup_ui(self):
         """Configura l'interfaccia utente avanzata"""
         
+        # Crea menu con selettore lingua
+        self.create_menu()
+        
         # Notebook per le diverse sezioni
-        notebook = ttk.Notebook(self.root)
-        notebook.pack(fill="both", expand=True, padx=10, pady=10)
+        self.notebook = ttk.Notebook(self.root)
+        self.notebook.pack(fill="both", expand=True, padx=10, pady=10)
         
         # Tab 1: Download da Street View
-        self.streetview_frame = ttk.Frame(notebook)
-        notebook.add(self.streetview_frame, text="📍 Download Street View")
+        self.streetview_frame = ttk.Frame(self.notebook)
+        self.notebook.add(self.streetview_frame, text=t('tab_streetview'))
         self.setup_streetview_tab()
         
         # Tab 2: Conversione File Locali
-        self.local_frame = ttk.Frame(notebook)
-        notebook.add(self.local_frame, text="📁 Conversione File Locali")
+        self.local_frame = ttk.Frame(self.notebook)
+        self.notebook.add(self.local_frame, text=t('tab_local_files'))
         self.setup_local_tab()
         
         # Tab 3: Download Multipli
-        self.batch_frame = ttk.Frame(notebook)
-        notebook.add(self.batch_frame, text="📋 Download Multipli")
+        self.batch_frame = ttk.Frame(self.notebook)
+        self.notebook.add(self.batch_frame, text=t('tab_batch'))
         self.setup_batch_tab()
         
         # Status bar globale
         self.setup_status_bar()
+    
+    def create_menu(self):
+        """Crea la barra dei menu con selettore lingua"""
+        self.menubar = tk.Menu(self.root)
+        self.root.config(menu=self.menubar)
+        
+        # Menu File
+        file_menu = tk.Menu(self.menubar, tearoff=0)
+        self.menubar.add_cascade(label=t('menu_file'), menu=file_menu)
+        file_menu.add_command(label=t('menu_exit'), command=self.root.quit)
+        
+        # Menu Lingua
+        language_menu = tk.Menu(self.menubar, tearoff=0)
+        self.menubar.add_cascade(label=t('menu_language'), menu=language_menu)
+        language_menu.add_command(label="English", command=lambda: set_language('en'))
+        language_menu.add_command(label="Italiano", command=lambda: set_language('it'))
         
     def setup_streetview_tab(self):
         """Configura il tab per download singolo da Street View"""
         frame = self.streetview_frame
         
         # Titolo
-        title_label = ttk.Label(frame, text="Download Singolo da Google Street View", 
+        title_label = ttk.Label(frame, text=t('sv_title'), 
                                font=("Arial", 14, "bold"))
         title_label.pack(pady=(10, 20))
+        self.ui_elements['sv_title'] = title_label
         
         # Frame principale
         main_frame = ttk.Frame(frame)
         main_frame.pack(fill="both", expand=True, padx=20)
         
         # URL Input
-        url_frame = ttk.LabelFrame(main_frame, text="URL Street View", padding="10")
+        url_frame = ttk.LabelFrame(main_frame, text=t('sv_url_label'), padding="10")
         url_frame.pack(fill="x", pady=(0, 10))
+        self.ui_elements['sv_url_frame'] = url_frame
         
         self.url_var = tk.StringVar()
         url_entry = ttk.Entry(url_frame, textvariable=self.url_var, width=60)
         url_entry.pack(side="left", fill="x", expand=True)
         
-        ttk.Button(url_frame, text="Estrai PanoID", 
-                  command=self.extract_panoid_single).pack(side="right", padx=(10, 0))
+        extract_btn = ttk.Button(url_frame, text=t('sv_extract_btn'), 
+                                command=self.extract_panoid_single)
+        extract_btn.pack(side="right", padx=(10, 0))
+        self.ui_elements['sv_extract_btn'] = extract_btn
         
         # PanoID
         panoid_frame = ttk.LabelFrame(main_frame, text="PanoID", padding="10")
@@ -102,35 +237,32 @@ class AdvancedStreetViewDownloader:
         panoid_entry = ttk.Entry(panoid_frame, textvariable=self.panoid_var, width=60)
         panoid_entry.pack(side="left", fill="x", expand=True)
         
-        ttk.Button(panoid_frame, text="Valida", 
-                  command=self.validate_panoid_single).pack(side="right", padx=(10, 0))
+        validate_btn = ttk.Button(panoid_frame, text=t('validate_btn'), 
+                                 command=self.validate_panoid_single)
+        validate_btn.pack(side="right", padx=(10, 0))
+        self.ui_elements['validate_btn'] = validate_btn
         
         # Opzioni di download
-        options_frame = ttk.LabelFrame(main_frame, text="Opzioni Download", padding="10")
+        options_frame = ttk.LabelFrame(main_frame, text=t('sv_options_title'), padding="10")
         options_frame.pack(fill="x", pady=(0, 10))
+        self.ui_elements['sv_options_frame'] = options_frame
         
         # Risoluzione
         res_frame = ttk.Frame(options_frame)
         res_frame.pack(fill="x", pady=(0, 5))
         
-        ttk.Label(res_frame, text="Risoluzione:").pack(side="left")
+        res_label = ttk.Label(res_frame, text=t('sv_resolution_label'))
+        res_label.pack(side="left")
+        self.ui_elements['sv_resolution_label'] = res_label
+        
         self.resolution_var = tk.StringVar(value="2")
         resolution_combo = ttk.Combobox(res_frame, textvariable=self.resolution_var, 
                                        values=["0", "1", "2", "3", "4"], state="readonly", width=5)
         resolution_combo.pack(side="left", padx=(10, 0))
         
-        # Overlap per Structure from Motion
-        overlap_frame = ttk.Frame(options_frame)
-        overlap_frame.pack(fill="x", pady=(5, 5))
-        
-        ttk.Label(overlap_frame, text="Overlap SfM:").pack(side="left")
+        # Overlap rimosso: manteniamo la variabile per compatibilità, ma non usiamo la feature
         self.overlap_var = tk.StringVar(value="0")
-        overlap_combo = ttk.Combobox(overlap_frame, textvariable=self.overlap_var,
-                                    values=["0", "10", "20", "30", "40", "50"], 
-                                    state="readonly", width=5)
-        overlap_combo.pack(side="left", padx=(10, 0))
-        ttk.Label(overlap_frame, text="% (per photogrammetry)").pack(side="left", padx=(5, 0))
-        
+
         ttk.Label(res_frame, text="(0=512px, 1=1024px, 2=2048px, 3=4096px, 4=8192px)", 
                  font=("Arial", 8)).pack(side="left", padx=(10, 0))
         
@@ -138,27 +270,40 @@ class AdvancedStreetViewDownloader:
         format_frame = ttk.Frame(options_frame)
         format_frame.pack(fill="x", pady=(5, 0))
         
-        ttk.Label(format_frame, text="Formato Output:").pack(side="left")
+        format_label = ttk.Label(format_frame, text=t('sv_format_label'))
+        format_label.pack(side="left")
+        self.ui_elements['sv_format_label'] = format_label
+        
         self.output_format_var = tk.StringVar(value="equirectangular")
         
-        equirect_radio = ttk.Radiobutton(format_frame, text="Equirettangolare", 
+        equirect_radio = ttk.Radiobutton(format_frame, text=t('sv_format_equirect'), 
                                        variable=self.output_format_var, value="equirectangular")
         equirect_radio.pack(side="left", padx=(10, 0))
+        self.ui_elements['sv_format_equirect'] = equirect_radio
         
-        cubemap_radio = ttk.Radiobutton(format_frame, text="Cubemap (6 file)", 
+        cubemap_radio = ttk.Radiobutton(format_frame, text=t('sv_format_cubemap'), 
                                       variable=self.output_format_var, value="cubemap")
         cubemap_radio.pack(side="left", padx=(10, 0))
+        self.ui_elements['sv_format_cubemap'] = cubemap_radio
         
         # Pulsanti azione
         button_frame = ttk.Frame(main_frame)
         button_frame.pack(fill="x", pady=20)
+
+        download_btn = ttk.Button(button_frame, text=t('sv_download_btn'), 
+                                 command=self.download_single)
+        download_btn.pack(side="left", padx=(0, 10))
+        self.ui_elements['sv_download_btn'] = download_btn
         
-        ttk.Button(button_frame, text="📥 Download", 
-                  command=self.download_single).pack(side="left", padx=(0, 10))
-        ttk.Button(button_frame, text="💾 Salva", 
-                  command=self.save_single).pack(side="left", padx=(0, 10))
-        ttk.Button(button_frame, text="🗑️ Pulisci", 
-                  command=self.clear_single).pack(side="left")
+        save_btn = ttk.Button(button_frame, text=t('sv_save_btn'), 
+                             command=self.save_single)
+        save_btn.pack(side="left", padx=(0, 10))
+        self.ui_elements['sv_save_btn'] = save_btn
+        
+        clear_btn = ttk.Button(button_frame, text=t('clear_btn'), 
+                              command=self.clear_single)
+        clear_btn.pack(side="left")
+        self.ui_elements['clear_btn'] = clear_btn
         
         # Progress bar
         self.progress_single_var = tk.DoubleVar()
@@ -167,15 +312,16 @@ class AdvancedStreetViewDownloader:
         self.progress_single.pack(fill="x", pady=(10, 0))
         
         # Status label
-        self.status_single_var = tk.StringVar(value="Pronto")
+        self.status_single_var = tk.StringVar(value=t('status_ready'))
         self.status_single = ttk.Label(main_frame, textvariable=self.status_single_var)
         self.status_single.pack(pady=(5, 0))
         
         # Anteprima
-        preview_frame = ttk.LabelFrame(main_frame, text="Anteprima", padding="10")
+        preview_frame = ttk.LabelFrame(main_frame, text=t('sv_preview_title'), padding="10")
         preview_frame.pack(fill="both", expand=True, pady=(10, 0))
+        self.ui_elements['sv_preview_frame'] = preview_frame
         
-        self.preview_single = ttk.Label(preview_frame, text="Nessuna immagine caricata")
+        self.preview_single = ttk.Label(preview_frame, text=t('no_image_loaded'))
         self.preview_single.pack(expand=True)
         
     def setup_local_tab(self):
@@ -507,18 +653,14 @@ class AdvancedStreetViewDownloader:
                 equirect_image = self.download_streetview_image(panoid, zoom, self.progress_single_var, self.status_single_var)
                 
                 if equirect_image:
-                    # Applica overlap se richiesto
-                    overlap_percent = int(self.overlap_var.get())
-                    if overlap_percent > 0:
-                        self.status_single_var.set(f"Applicazione overlap {overlap_percent}%...")
-                        equirect_image = self.create_overlap_image(equirect_image, overlap_percent, panoid)
-                    
+                    # Non applichiamo overlap: esportiamo l'immagine così com'è
+                    overlap_percent = 0
+
                     self.current_image = equirect_image
                     
                     if output_format == "equirectangular":
                         self.show_preview_single(equirect_image)
-                        overlap_info = f" (overlap {overlap_percent}%)" if overlap_percent > 0 else ""
-                        self.status_single_var.set(f"✅ Download completato! Immagine {equirect_image.size[0]}×{equirect_image.size[1]}{overlap_info}")
+                        self.status_single_var.set(f"✅ Download completato! Immagine {equirect_image.size[0]}×{equirect_image.size[1]}")
                     else:  # cubemap
                         self.status_single_var.set("Conversione in cubemap...")
                         cubemap_faces = self.equirect_to_cubemap(equirect_image)
@@ -528,8 +670,7 @@ class AdvancedStreetViewDownloader:
                         if 'front' in cubemap_faces:
                             self.show_preview_single(cubemap_faces['front'])
                         
-                        overlap_info = f" (da equirect con overlap {overlap_percent}%)" if overlap_percent > 0 else ""
-                        self.status_single_var.set(f"✅ Cubemap generato! 6 facce {list(cubemap_faces.values())[0].size[0]}×{list(cubemap_faces.values())[0].size[1]}{overlap_info}")
+                        self.status_single_var.set(f"✅ Cubemap generato! 6 facce {list(cubemap_faces.values())[0].size[0]}×{list(cubemap_faces.values())[0].size[1]}")
                     
                     self.progress_single_var.set(100)
                 else:
@@ -1002,15 +1143,23 @@ class AdvancedStreetViewDownloader:
         try:
             # Calcola dimensioni tiles
             tile_size = 512
+            # Configurazione zoom corretta per Google Street View
             zoom_config = {
-                0: (1, 1),
-                1: (2, 1), 
-                2: (4, 2),
-                3: (8, 4),
-                4: (16, 8)
+                0: (1, 1),      # 512x512
+                1: (2, 1),      # 1024x512  
+                2: (4, 2),      # 2048x1024
+                3: (8, 4),      # 4096x2048
+                4: (16, 8),     # 8192x4096
+                5: (32, 16)     # 16384x8192 (se disponibile)
             }
             
+            # Verifica che zoom sia supportato
+            if zoom not in zoom_config:
+                print(f"⚠ Zoom {zoom} non supportato, uso zoom 2")
+                zoom = 2
+            
             tiles_x, tiles_y = zoom_config[zoom]
+            print(f"📐 Download risoluzione zoom {zoom}: {tiles_x}x{tiles_y} tiles")
             
             # Crea immagine finale
             final_width = tiles_x * tile_size
@@ -1020,25 +1169,35 @@ class AdvancedStreetViewDownloader:
             total_tiles = tiles_x * tiles_y
             downloaded_tiles = 0
             
-            # Download tiles
+            print(f"🔽 Inizio download {total_tiles} tiles...")
+            
+            # Download tiles con retry
             for y in range(tiles_y):
                 for x in range(tiles_x):
                     url = self.get_tile_url(panoid, x, y, zoom)
                     
-                    try:
-                        response = requests.get(url, timeout=10)
-                        if response.status_code == 200:
-                            from io import BytesIO
-                            tile_image = Image.open(BytesIO(response.content))
-                            final_image.paste(tile_image, (x * tile_size, y * tile_size))
-                        else:
-                            # Tile vuota
-                            empty_tile = Image.new('RGB', (tile_size, tile_size), (64, 64, 64))
-                            final_image.paste(empty_tile, (x * tile_size, y * tile_size))
+                    # Retry per tile fallite
+                    success = False
+                    for attempt in range(3):  # Max 3 tentativi
+                        try:
+                            response = requests.get(url, timeout=15)  # Timeout aumentato
+                            if response.status_code == 200:
+                                from io import BytesIO
+                                tile_image = Image.open(BytesIO(response.content))
+                                final_image.paste(tile_image, (x * tile_size, y * tile_size))
+                                success = True
+                                break
+                            else:
+                                print(f"  ⚠ Tile ({x},{y}) status {response.status_code}, tentativo {attempt+1}")
+                        
+                        except Exception as e:
+                            print(f"  ❌ Tile ({x},{y}) errore: {e}, tentativo {attempt+1}")
+                            time.sleep(0.5)  # Pausa prima retry
                     
-                    except Exception as e:
-                        # Tile errore
-                        error_tile = Image.new('RGB', (tile_size, tile_size), (128, 0, 0))
+                    if not success:
+                        # Tile definitivamente fallita - usa grigio
+                        print(f"  💀 Tile ({x},{y}) fallita definitivamente")
+                        error_tile = Image.new('RGB', (tile_size, tile_size), (64, 64, 64))
                         final_image.paste(error_tile, (x * tile_size, y * tile_size))
                     
                     downloaded_tiles += 1
@@ -1050,6 +1209,9 @@ class AdvancedStreetViewDownloader:
                     
                     if status_var:
                         status_var.set(f"Download: {downloaded_tiles}/{total_tiles} tiles")
+                        
+                    # Small delay per evitare rate limiting
+                    time.sleep(0.1)
             
             return final_image
         except Exception as e:
@@ -1067,86 +1229,80 @@ class AdvancedStreetViewDownloader:
             return None
     
     def create_overlap_image(self, base_image, overlap_percent, panoid=None):
-        """
-        Crea immagine con overlap per Structure from Motion
-        
-        Args:
-            base_image: Immagine equirettangolare base
-            overlap_percent: Percentuale di overlap (0-50)
-            panoid: PanoID per cercare immagini adiacenti
-        
-        Returns:
-            PIL Image con overlap sui bordi
-        """
-        if overlap_percent <= 0:
-            return base_image
-            
-        try:
-            width, height = base_image.size
-            overlap_ratio = overlap_percent / 100.0
-            
-            # Calcola nuove dimensioni con overlap
-            new_width = int(width * (1 + overlap_ratio))
-            new_height = int(height * (1 + overlap_ratio * 0.5))  # Overlap verticale minore
-            
-            # Crea immagine espansa
-            expanded_image = Image.new('RGB', (new_width, new_height), (0, 0, 0))
-            
-            # Calcola offset per centrare l'immagine base
-            offset_x = int(width * overlap_ratio * 0.5)
-            offset_y = int(height * overlap_ratio * 0.25)
-            
-            # Incolla immagine base al centro
-            expanded_image.paste(base_image, (offset_x, offset_y))
-            
-            # Genera bordi con overlap utilizzando wrapping panoramico
-            self._fill_overlap_borders(expanded_image, base_image, offset_x, offset_y, overlap_ratio)
-            
-            return expanded_image
-            
-        except Exception as e:
-            print(f"Errore creazione overlap: {e}")
-            return base_image
+        """Overlap removed: compatibility no-op returning base image."""
+        return base_image
     
-    def _fill_overlap_borders(self, expanded_image, base_image, offset_x, offset_y, overlap_ratio):
-        """Riempie i bordi dell'immagine espansa con overlap panoramico"""
+    def _fill_overlap_borders_v2(self, expanded_image, base_image, offset_x, offset_y, overlap_ratio):
+        """Riempie i bordi dell'immagine espansa mantenendo proporzioni 2:1"""
         width, height = base_image.size
+        exp_width, exp_height = expanded_image.size
         
         # Bordo sinistro - wraparound orizzontale
         if offset_x > 0:
             # Prendi parte destra dell'immagine base per il bordo sinistro
-            right_strip_width = offset_x
-            right_strip = base_image.crop((width - right_strip_width, 0, width, height))
+            strip_width = offset_x
+            right_strip = base_image.crop((width - strip_width, 0, width, height))
+            
+            # Scala verticalmente se necessario per riempire altezza espansa
+            if exp_height != height:
+                right_strip = right_strip.resize((strip_width, exp_height), Image.Resampling.LANCZOS)
+            
             expanded_image.paste(right_strip, (0, offset_y))
         
         # Bordo destro - wraparound orizzontale  
-        exp_width, exp_height = expanded_image.size
-        if exp_width > offset_x + width:
+        remaining_width = exp_width - (offset_x + width)
+        if remaining_width > 0:
             # Prendi parte sinistra dell'immagine base per il bordo destro
-            left_strip_width = exp_width - (offset_x + width)
-            left_strip = base_image.crop((0, 0, left_strip_width, height))
+            left_strip = base_image.crop((0, 0, remaining_width, height))
+            
+            # Scala verticalmente se necessario
+            if exp_height != height:
+                left_strip = left_strip.resize((remaining_width, exp_height), Image.Resampling.LANCZOS)
+            
             expanded_image.paste(left_strip, (offset_x + width, offset_y))
         
-        # Bordo superiore - stretch dell'equatore
+        # Bordi superiore e inferiore - stretch orizzontale dell'equatore
         if offset_y > 0:
             # Usa le righe equatoriali per il bordo superiore
             equator_y = height // 2
-            top_strip_height = offset_y
-            equator_strip = base_image.crop((0, equator_y - 10, width, equator_y + 10))
-            equator_resized = equator_strip.resize((width, top_strip_height), Image.Resampling.LANCZOS)
+            equator_strip = base_image.crop((0, equator_y - 5, width, equator_y + 5))
+            equator_resized = equator_strip.resize((width, offset_y), Image.Resampling.LANCZOS)
             expanded_image.paste(equator_resized, (offset_x, 0))
+            
+            # Riempi anche i bordi sinistro/destro dell'area superiore
+            if offset_x > 0:
+                # Bordo superiore sinistro
+                eq_left = equator_strip.crop((width - offset_x, 0, width, 10))
+                eq_left_resized = eq_left.resize((offset_x, offset_y), Image.Resampling.LANCZOS)
+                expanded_image.paste(eq_left_resized, (0, 0))
+            
+            if remaining_width > 0:
+                # Bordo superiore destro
+                eq_right = equator_strip.crop((0, 0, remaining_width, 10))
+                eq_right_resized = eq_right.resize((remaining_width, offset_y), Image.Resampling.LANCZOS)
+                expanded_image.paste(eq_right_resized, (offset_x + width, 0))
         
-        # Bordo inferiore - stretch dell'equatore
-        if exp_height > offset_y + height:
+        # Bordo inferiore
+        remaining_height = exp_height - (offset_y + height)
+        if remaining_height > 0:
             # Usa le righe equatoriali per il bordo inferiore
             equator_y = height // 2
-            bottom_strip_height = exp_height - (offset_y + height)
-            equator_strip = base_image.crop((0, equator_y - 10, width, equator_y + 10))
-            equator_resized = equator_strip.resize((width, bottom_strip_height), Image.Resampling.LANCZOS)
+            equator_strip = base_image.crop((0, equator_y - 5, width, equator_y + 5))
+            equator_resized = equator_strip.resize((width, remaining_height), Image.Resampling.LANCZOS)
             expanded_image.paste(equator_resized, (offset_x, offset_y + height))
-        
-        # Riempi gli angoli con interpolazione
-        self._fill_corner_overlaps(expanded_image, base_image, offset_x, offset_y)
+            
+            # Riempi anche i bordi sinistro/destro dell'area inferiore
+            if offset_x > 0:
+                # Bordo inferiore sinistro
+                eq_left = equator_strip.crop((width - offset_x, 0, width, 10))
+                eq_left_resized = eq_left.resize((offset_x, remaining_height), Image.Resampling.LANCZOS)
+                expanded_image.paste(eq_left_resized, (0, offset_y + height))
+            
+            if remaining_width > 0:
+                # Bordo inferiore destro
+                eq_right = equator_strip.crop((0, 0, remaining_width, 10))
+                eq_right_resized = eq_right.resize((remaining_width, remaining_height), Image.Resampling.LANCZOS)
+                expanded_image.paste(eq_right_resized, (offset_x + width, offset_y + height))
     
     def _fill_corner_overlaps(self, expanded_image, base_image, offset_x, offset_y):
         """Riempie gli angoli dell'immagine espansa con interpolazione"""
@@ -1173,6 +1329,304 @@ class AdvancedStreetViewDownloader:
             # Angolo bottom-right
             corner_br = base_image.crop((0, height - corner_h, corner_w, height))
             expanded_image.paste(corner_br, (offset_x + width, offset_y + height))
+
+    # -----------------------------------------------------------------
+    # Metodi per download metadata e creazione overlap reale
+    # -----------------------------------------------------------------
+    def fetch_pano_metadata(self, panoid):
+        """Scarica metadata di un pano (se disponibili) per ottenere link ai vicini."""
+        try:
+            url = f"https://maps.google.com/cbk?output=json&panoid={panoid}"
+            resp = requests.get(url, timeout=10)
+            if resp.status_code != 200:
+                return None
+            text = resp.text
+            try:
+                data = resp.json()
+            except Exception:
+                idx = text.find('{')
+                if idx >= 0:
+                    try:
+                        data = json.loads(text[idx:])
+                    except Exception:
+                        return None
+                else:
+                    return None
+            return data
+        except Exception:
+            return None
+
+    def download_equirectangular_pano(self, panoid, zoom=2):
+        """Scarica l'equirectangular di un pano usando download_streetview_image."""
+        try:
+            return self.download_streetview_image(panoid, zoom)
+        except Exception:
+            return None
+
+    def _create_true_overlap(self, base_image, panoid, overlap_percent, zoom=2):
+        """Crea overlap reale usando panorami limitrofi quando disponibili.
+
+        Restituisce un'immagine espansa con blend dei crop dai vicini o None se non applicabile.
+        """
+        # Require OpenCV for true-overlap pipeline (for alignment & blending)
+        try:
+            import cv2 as _cv2  # local import to use the environment's OpenCV
+        except Exception:
+            print("⚠ OpenCV non disponibile localmente: salto true-overlap")
+            return None
+
+        try:
+            meta = self.fetch_pano_metadata(panoid)
+            if not meta:
+                print("⚠ Metadata non trovati: useremo vicini sintetici (shift dell'equirettangolare)")
+                links = None
+
+            links = None
+            if isinstance(meta, dict):
+                for key in ['Links', 'links', 'l', 'data']:
+                    if key in meta:
+                        # alcuni endpoint annidano i dati
+                        links = meta[key]
+                        break
+                if links is None and 'data' in meta and isinstance(meta['data'], dict):
+                    for key in ['Links', 'links', 'l']:
+                        if key in meta['data']:
+                            links = meta['data'][key]
+                            break
+
+            # Precompute sizes for synthetic neighbor creation if needed
+            width, height = base_image.size
+            ov_w = int(width * (overlap_percent / 100.0))
+            ov_h = int(height * (overlap_percent / 100.0))
+
+            if not links:
+                # Create synthetic neighbors by horizontally rolling the base image.
+                # This helps when metadata is not available but we still want a 'real' overlap.
+                print("⚠ Metadata non trovati: uso vicini sintetici ottenuti shiftando l'equirettangolare")
+                try:
+                    def roll_image(im, dx):
+                        w, h = im.size
+                        dx = int(dx) % w
+                        if dx == 0:
+                            return im.copy()
+                        left = im.crop((0, 0, dx, h))
+                        right = im.crop((dx, 0, w, h))
+                        new = Image.new('RGB', (w, h))
+                        new.paste(right, (0, 0))
+                        new.paste(left, (w - dx, 0))
+                        return new
+
+                    synth_shift = max(ov_w * 2, width // 4)
+                    neigh_left_img = roll_image(base_image, synth_shift)
+                    neigh_right_img = roll_image(base_image, -synth_shift)
+
+                    links = [
+                        {'img': neigh_left_img, 'side': 'left'},
+                        {'img': neigh_right_img, 'side': 'right'},
+                    ]
+                except Exception as e:
+                    print(f"⚠ Errore creazione vicini sintetici: {e}")
+                    return None
+
+            new_w = width + 2 * ov_w
+            new_h = height + 2 * ov_h
+            expanded = Image.new('RGB', (new_w, new_h))
+            offset_x = ov_w
+            offset_y = ov_h
+            expanded.paste(base_image, (offset_x, offset_y))
+
+            placed_left = False
+            placed_right = False
+
+            # ensure debug folder exists
+            dbg_folder = os.path.join('debug_outputs', 'true_overlap_debug')
+            try:
+                os.makedirs(dbg_folder, exist_ok=True)
+            except Exception:
+                dbg_folder = None
+
+            # links può essere lista di dict o array; iteriamo
+            for link in links:
+                try:
+                    # allow pre-supplied neighbor images (synthetic case)
+                    neigh_img = None
+                    yaw = None
+                    neighbor_panoid = None
+
+                    if isinstance(link, dict) and 'img' in link:
+                        neigh_img = link['img']
+                        yaw = link.get('yaw') or None
+                    else:
+                        if isinstance(link, dict):
+                            neighbor_panoid = link.get('pano') or link.get('panoid') or link.get('id')
+                            yaw = link.get('yaw') or link.get('heading')
+                        elif isinstance(link, (list, tuple)) and len(link) >= 2:
+                            neighbor_panoid = link[0]
+                            yaw = None
+
+                        if neighbor_panoid:
+                            neigh_img = self.download_equirectangular_pano(neighbor_panoid, zoom)
+
+                    if neigh_img is None:
+                        continue
+
+                    # se necessario scala verticalmente
+                    nw, nh = neigh_img.size
+                    if nh != height:
+                        neigh_scaled = neigh_img.resize((int(nw * (height / nh)), height), Image.Resampling.LANCZOS)
+                    else:
+                        neigh_scaled = neigh_img
+
+                    # Decide side basandosi su yaw oppure tentativo greedy
+                    side = None
+                    if yaw is not None:
+                        try:
+                            yawf = float(yaw) % 360
+                            if 45 <= yawf <= 135:
+                                side = 'right'
+                            elif 225 <= yawf <= 315:
+                                side = 'left'
+                        except Exception:
+                            side = None
+
+                    if side is None:
+                        side = 'right' if not placed_right else ('left' if not placed_left else None)
+
+                    if side == 'right' and not placed_right:
+                        crop = neigh_scaled.crop((0, 0, ov_w, height))
+                        crop = crop.resize((ov_w, height), Image.Resampling.LANCZOS)
+                        base_strip = base_image.crop((width - ov_w, 0, width, height))
+                        # Use OpenCV alignment + feather blending
+                        try:
+                            blended = self._align_and_feather_blend(base_strip, crop)
+                        except Exception as e:
+                            print(f"⚠ align/blend right failed: {e}")
+                            blended = Image.blend(base_strip, crop, alpha=0.5)
+
+                        expanded.paste(blended, (offset_x + width, offset_y))
+                        placed_right = True
+                        # save debug
+                        if dbg_folder:
+                            try:
+                                base_strip.save(os.path.join(dbg_folder, f"{panoid}_base_right_strip.jpg"))
+                                crop.save(os.path.join(dbg_folder, f"{panoid}_neigh_right_crop.jpg"))
+                                blended.save(os.path.join(dbg_folder, f"{panoid}_blended_right.jpg"))
+                            except Exception:
+                                pass
+
+                    elif side == 'left' and not placed_left:
+                        crop = neigh_scaled.crop((neigh_scaled.size[0] - ov_w, 0, neigh_scaled.size[0], height))
+                        crop = crop.resize((ov_w, height), Image.Resampling.LANCZOS)
+                        base_strip = base_image.crop((0, 0, ov_w, height))
+                        try:
+                            blended = self._align_and_feather_blend(base_strip, crop)
+                        except Exception as e:
+                            print(f"⚠ align/blend left failed: {e}")
+                            blended = Image.blend(base_strip, crop, alpha=0.5)
+
+                        expanded.paste(blended, (0, offset_y))
+                        placed_left = True
+                        if dbg_folder:
+                            try:
+                                base_strip.save(os.path.join(dbg_folder, f"{panoid}_base_left_strip.jpg"))
+                                crop.save(os.path.join(dbg_folder, f"{panoid}_neigh_left_crop.jpg"))
+                                blended.save(os.path.join(dbg_folder, f"{panoid}_blended_left.jpg"))
+                            except Exception:
+                                pass
+
+                    if placed_left and placed_right:
+                        break
+
+                except Exception:
+                    continue
+
+            if not (placed_left or placed_right):
+                return None
+
+            try:
+                self._fill_overlap_borders_v2(expanded, base_image, offset_x, offset_y, overlap_percent/100.0)
+            except Exception:
+                pass
+
+            return expanded
+
+        except Exception as e:
+            print(f"Errore _create_true_overlap: {e}")
+            return None
+
+    def _align_and_feather_blend(self, imgA, imgB, feather=0.2):
+        """Allinea imgB su imgA usando feature-matching (ORB) e applica un blending sfumato.
+
+        imgA, imgB: PIL Images (stesse dimensioni attese)
+        feather: frazione della larghezza su cui applicare la dissolvenza
+        """
+        # Fallback semplice se OpenCV non disponibile
+        if not HAS_OPENCV:
+            return Image.blend(imgA, imgB, alpha=0.5)
+
+        try:
+            import cv2
+            import numpy as np
+
+            a = np.array(imgA.convert('RGB'))
+            b = np.array(imgB.convert('RGB'))
+
+            grayA = cv2.cvtColor(a, cv2.COLOR_RGB2GRAY)
+            grayB = cv2.cvtColor(b, cv2.COLOR_RGB2GRAY)
+
+            # ORB features
+            # Create ORB detector (use getattr to keep static checkers happy)
+            orb_creator = getattr(cv2, 'ORB_create', None)
+            if orb_creator is None:
+                # ORB not available in this OpenCV build - fallback
+                return Image.blend(imgA, imgB, alpha=0.5)
+            orb = orb_creator(1000)
+
+            kp1, des1 = orb.detectAndCompute(grayA, None)
+            kp2, des2 = orb.detectAndCompute(grayB, None)
+
+            if des1 is None or des2 is None:
+                return Image.blend(imgA, imgB, alpha=0.5)
+
+            bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+            matches = bf.match(des1, des2)
+            matches = sorted(matches, key=lambda x: x.distance)
+
+            if len(matches) < 8:
+                return Image.blend(imgA, imgB, alpha=0.5)
+
+            src_pts = np.array([kp2[m.trainIdx].pt for m in matches], dtype=np.float32).reshape(-1, 1, 2)
+            dst_pts = np.array([kp1[m.queryIdx].pt for m in matches], dtype=np.float32).reshape(-1, 1, 2)
+
+            M, mask = cv2.estimateAffinePartial2D(src_pts, dst_pts)
+            if M is None:
+                return Image.blend(imgA, imgB, alpha=0.5)
+
+            h, w = grayA.shape
+            warped = cv2.warpAffine(b, M, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
+
+            # Create feather mask horizontally
+            mask = np.zeros((h, w), dtype=np.float32)
+            fw = int(w * feather)
+            if fw < 1:
+                fw = 1
+            # Left to right fade
+            mask[:, :fw] = np.linspace(1.0, 0.0, fw)
+            mask[:, fw:w-fw] = 0.0
+            mask[:, w-fw:] = np.linspace(0.0, 1.0, fw)
+
+            # Combine with warped and original
+            warped_f = warped.astype(np.float32)
+            a_f = a.astype(np.float32)
+            alpha = mask[:, :, None]
+            # blended = a * (1-alpha) + warped * alpha  but we want seam across overlap area,
+            # so use alpha for warped contribution
+            blended = (a_f * (1.0 - alpha) + warped_f * alpha).astype(np.uint8)
+
+            return Image.fromarray(blended)
+
+        except Exception:
+            return Image.blend(imgA, imgB, alpha=0.5)
     
     def equirect_to_cubemap(self, equirect_image, face_size=None):
         """Converte immagine equirettangolare in cubemap"""
@@ -1187,33 +1641,96 @@ class AdvancedStreetViewDownloader:
             faces = {}
             face_names = ['front', 'right', 'back', 'left', 'up', 'down']
             
-            # Converte in array per elaborazione più veloce
+            # Converte in array per elaborazione più veloce e usa campionamento bilineare
             import numpy as np
-            if 'numpy' not in globals():
+            if not HAS_NUMPY:
                 # Fallback senza numpy
                 return self.equirect_to_cubemap_simple(equirect_image, face_size)
-            
-            img_array = np.array(equirect_image)
-            
+
+            img_array = np.array(equirect_image).astype(np.float32)
+
+            def bilinear_sample(xf, yf):
+                # xf, yf can be floats; wrap x horizontally, clamp y
+                # integer base indices (unwrapped for fractional computation)
+                x0_unwrapped = np.floor(xf).astype(int)
+                x0 = (x0_unwrapped % width).astype(int)
+                y0 = np.floor(yf).astype(int)
+                x1 = (x0 + 1) % width
+                y1 = np.clip(y0 + 1, 0, height - 1)
+
+                # fractional part (use unwrapped x0 for correct fraction)
+                wx = xf - x0_unwrapped
+                wy = yf - y0
+
+                # sample four neighbors
+                p00 = img_array[y0, x0]
+                p10 = img_array[y0, x1]
+                p01 = img_array[y1, x0]
+                p11 = img_array[y1, x1]
+
+                top = p00 * (1 - wx)[:, None] + p10 * (wx)[:, None]
+                bottom = p01 * (1 - wx)[:, None] + p11 * (wx)[:, None]
+                result = top * (1 - wy)[:, None] + bottom * (wy)[:, None]
+                return result
+
             for i, face_name in enumerate(face_names):
+                # Special-case pragmatic fixes requested by user:
+                # - back: compose from rightmost + leftmost vertical strips (wrap-around) and resize
+                # - up / down: take top/bottom strips rather than full spherical re-projection (avoids central artefacts)
+                if face_name == 'back':
+                    # angular width per face = 90deg -> corresponds to width/4 pixels in equirect
+                    slice_w = max(1, width // 4)
+                    # include a small overlap (15% of slice) to be safe
+                    overlap_px = max(1, slice_w * 15 // 100)
+                    right_strip = equirect_image.crop((width - slice_w - overlap_px, 0, width, height))
+                    left_strip = equirect_image.crop((0, 0, slice_w + overlap_px, height))
+                    combined = Image.new('RGB', (left_strip.width + right_strip.width, height))
+                    # paste left then right to preserve original left/right ordering
+                    combined.paste(left_strip, (0, 0))
+                    combined.paste(right_strip, (left_strip.width, 0))
+                    # Resize combined horizontally to face_size and vertically to face_size
+                    face_img = combined.resize((face_size, face_size), Image.Resampling.LANCZOS)
+                    faces[face_name] = face_img
+                    continue
+
+                if face_name == 'up' or face_name == 'down':
+                    # take a tall strip from the top (up) or bottom (down) of the equirect and resize
+                    # choose strip height as ~35% of image height (empirical)
+                    strip_h = max(2, int(height * 0.35))
+                    if face_name == 'up':
+                        strip = equirect_image.crop((0, 0, width, strip_h))
+                    else:
+                        strip = equirect_image.crop((0, height - strip_h, width, height))
+                    # center-crop horizontally to width (already full width) and resize to square face
+                    face_img = strip.resize((face_size, face_size), Image.Resampling.LANCZOS)
+                    faces[face_name] = face_img
+                    continue
+
+                # Generic case: spherical reprojection with bilinear sampling
                 face = np.zeros((face_size, face_size, 3), dtype=np.uint8)
-                
+
                 for v in range(face_size):
-                    for u in range(face_size):
-                        # Coordinate normalizzate [0,1]
-                        uf = (u + 0.5) / face_size
-                        vf = (v + 0.5) / face_size
-                        
-                        # Converte coordinate cubo in coordinate sferiche
-                        theta, phi = self.cube_to_sphere_coords(uf, vf, i)
-                        
-                        # Mappa su coordinate equirettangolari
-                        x = int((theta / (2 * math.pi) + 0.5) * width) % width
-                        y = int((phi / math.pi) * height)
-                        y = max(0, min(height - 1, y))
-                        
-                        face[v, u] = img_array[y, x]
-                
+                    uf = (np.arange(face_size, dtype=np.float32) + 0.5) / face_size
+                    vf = float(v + 0.5) / face_size
+
+                    # Converte coordinate cubo in coordinate sferiche
+                    thetas = np.empty(face_size, dtype=np.float32)
+                    phis = np.empty(face_size, dtype=np.float32)
+                    for idx, u_val in enumerate(uf):
+                        th, ph = self.cube_to_sphere_coords(float(u_val), float(vf), i)
+                        thetas[idx] = th
+                        phis[idx] = ph
+
+                    # Mappa su coordinate equirettangolari (float)
+                    xs = (thetas / (2 * math.pi) + 0.5) * width
+                    ys = (phis / math.pi) * height
+                    # ensure ys in [0, height-1]
+                    ys = np.clip(ys, 0, height - 1 - 1e-6)
+
+                    # Bilinear sampling per riga
+                    samples = bilinear_sample(xs, ys)
+                    face[v, :, :] = np.clip(samples, 0, 255).astype(np.uint8)
+
                 faces[face_name] = Image.fromarray(face)
             
             return faces
@@ -1253,22 +1770,25 @@ class AdvancedStreetViewDownloader:
     def cube_to_sphere_coords(self, u, v, face):
         """Converte coordinate cubo in coordinate sferiche"""
         # Normalizza a [-1, 1]
-        u = u * 2.0 - 1.0
-        v = v * 2.0 - 1.0
-        
-        # Coordinate 3D del cubo
-        if face == 0:  # front
-            x, y, z = 1.0, -v, -u
-        elif face == 1:  # right
-            x, y, z = u, -v, 1.0
-        elif face == 2:  # back
-            x, y, z = -1.0, -v, u
-        elif face == 3:  # left
-            x, y, z = -u, -v, -1.0
-        elif face == 4:  # up
-            x, y, z = u, 1.0, v
-        elif face == 5:  # down
-            x, y, z = u, -1.0, -v
+        uu = u * 2.0 - 1.0
+        vv = v * 2.0 - 1.0
+
+        # Convert image Y (downward) to 3D Y (upward)
+        y_common = -vv
+
+        # Standard cube face mapping (assumes faces order: front, right, back, left, up, down)
+        if face == 0:  # front (+Z)
+            x, y, z = uu, y_common, 1.0
+        elif face == 1:  # right (+X)
+            x, y, z = 1.0, y_common, -uu
+        elif face == 2:  # back (-Z)
+            x, y, z = -uu, y_common, -1.0
+        elif face == 3:  # left (-X)
+            x, y, z = -1.0, y_common, uu
+        elif face == 4:  # up (+Y)
+            x, y, z = uu, 1.0, vv
+        elif face == 5:  # down (-Y)
+            x, y, z = uu, -1.0, -vv
         else:
             x, y, z = 1.0, 0.0, 0.0
         
@@ -1288,7 +1808,7 @@ class AdvancedStreetViewDownloader:
         face_names = ['front', 'right', 'back', 'left', 'up', 'down']
         
         for face_name in face_names:
-            faces[face_name] = Image.new('RGB', (face_size, face_size), (128, 128, 128))
+            faces[face_name] = Image.new('RGB', (face_size, face_size), color=(128, 128, 128))
         
         return faces
     
